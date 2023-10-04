@@ -42,7 +42,7 @@ class OCO(bt.Strategy):
 
     def notify_data(self, data, status, *args, **kwargs):
         """Изменение статуса приходящих баров"""
-        data_status = data._getstatusname(status)  # Получаем статус (только при LiveBars=True)
+        data_status = data._getstatusname(status)  # Получаем статус (только при live=True)
         print(data_status)  # Не можем вывести в лог, т.к. первый статус DELAYED получаем до первого бара (и его даты)
         self.isLive = data_status == 'LIVE'  # Режим реальной торговли
 
@@ -77,11 +77,11 @@ if __name__ == '__main__':  # Точка входа при запуске это
 
     cerebro.addstrategy(OCO, LimitPct=1)  # Добавляем торговую систему с лимитным входом в n%
     store = QKStore()  # Хранилище QUIK
-    # broker = store.getbroker(use_positions=False, ClientCode=clientCode, FirmId=firmId, TradeAccountId='L01-00000F00', LimitKind=2, CurrencyCode='SUR', IsFutures=False)  # Брокер со счетом фондового рынка РФ
+    # broker = store.getbroker(use_positions=False, client_code=clientCode, firm_id=firmId, trade_acc_id='L01-00000F00', limit_kind=2, curr_code='SUR', is_futures=False)  # Брокер со счетом фондового рынка РФ
     broker = store.getbroker(use_positions=False)  # Брокер со счетом по умолчанию (срочный рынок РФ)
     cerebro.setbroker(broker)  # Устанавливаем брокера
     data = store.getdata(dataname=symbol, timeframe=bt.TimeFrame.Minutes, compression=1,
-                         fromdate=datetime(2023, 2, 5), sessionstart=time(7, 0), LiveBars=True)  # Исторические и новые минутные бары за все время
+                         fromdate=datetime(2023, 2, 5), sessionstart=time(7, 0), live=True)  # Исторические и новые минутные бары за все время
     cerebro.adddata(data)  # Добавляем данные
     cerebro.addsizer(bt.sizers.FixedSize, stake=1000)  # Кол-во акций для покупки/продажи
     cerebro.run()  # Запуск торговой системы

@@ -1,67 +1,60 @@
-import collections
+from collections import deque
 from datetime import datetime
 from pytz import timezone
 
-from backtrader.metabase import MetaParams
-from backtrader.utils.py3 import with_metaclass
-from backtrader import Order
-from backtrader.position import Position
+from backtrader.store import Store
+
+# from backtrader import Order
+# from backtrader.position import Position
 
 from QuikPy import QuikPy
+from .QKData import QKData
+from .QKBroker import QKBroker
 
 
-class MetaSingleton(MetaParams):
-    """Метакласс для создания Singleton классов"""
-    def __init__(cls, *args, **kwargs):
-        """Инициализация класса"""
-        super(MetaSingleton, cls).__init__(*args, **kwargs)
-        cls._singleton = None  # Экземпляра класса еще нет
-
-    def __call__(cls, *args, **kwargs):
-        """Вызов класса"""
-        if not cls._singleton:  # Если класса нет в экземплярах класса
-            cls._singleton = super(MetaSingleton, cls).__call__(*args, **kwargs)  # то создаем зкземпляр класса
-        return cls._singleton  # Возвращаем экземпляр класса
-
-
-class QKStore(with_metaclass(MetaSingleton, object)):
+class QKStore(Store):
     """Хранилище QUIK"""
+
     params = (
-        ('Host', '127.0.0.1'),  # Адрес/IP компьютера с QUIK
-        ('RequestsPort', 34130),  # Номер порта для запросов и ответов
-        ('CallbacksPort', 34131),  # Номер порта для получения событий
-        ('StopSteps', 10),  # Размер в минимальных шагах цены инструмента для исполнения стоп заявок
+        ('host', '127.0.0.1'),  # Адрес/IP компьютера с QUIK
     )
 
-    BrokerCls = None  # Класс брокера будет задан из брокера
-    DataCls = None  # Класс данных будет задан из данных
+    # @classmethod
+    def getdata(self, **kwargs):
+        """Return QKData with args, kwargs"""
+        data = self.DataCls(self, **kwargs)
+        return data
 
-    MarketTimeZone = timezone('Europe/Moscow')  # Биржа работает по московскому времени
+    # @classmethod
+    def getbroker(self, *args, **kwargs):
+        """Return broker with *args, **kwargs from registered QKBroker"""
+        broker = self.BrokerCls(self, **kwargs)
+        return broker
 
-    @classmethod
-    def getdata(cls, *args, **kwargs):
-        """Returns DataCls with args, kwargs"""
-        return cls.DataCls(*args, **kwargs)
+    BrokerCls = QKBroker
+    DataCls = QKData
 
-    @classmethod
-    def getbroker(cls, *args, **kwargs):
-        """Returns broker with *args, **kwargs from registered BrokerCls"""
-        return cls.BrokerCls(*args, **kwargs)
+    MarketTimeZone = timezone('Europe/Moscow')
 
     def __init__(self):
-        super(QKStore, self).__init__()
-        self.notifs = collections.deque()  # Уведомления хранилища
-        self.provider = QuikPy(host=self.p.Host, requests_port=self.p.RequestsPort, callbacks_port=self.p.CallbacksPort)  # Вызываем конструктор QuikPy с адресом хоста и портами
+        super().__init__()
+        self.notifs = deque()  # Уведомления хранилища
+        # Вызываем конструктор QuikPy с адресом хоста
+        self.provider = QuikPy(host=self.p.host)
         self.symbols = {}  # Информация о тикерах
-        self.new_bars = []  # Новые бары по всем подпискам на тикеры из QUIK
-        self.connected = True  # Считаем, что изначально QUIK подключен к серверу брокера
-        self.class_codes = self.provider.GetClassesList()['data']  # Список классов. В некоторых таблицах тикер указывается без кода класса
-        self.subscribed_symbols = []  # Список подписанных тикеров/интервалов
+        # Проверяем подключен ли QUIK к серверу брокера
+        self.connected = self.provider.isConnected()
+        # Список классов. В некоторых таблицах тикер указывается без кода класса
+        self.class_codes = self.provider.getClassesList()
+        self.subscribed_data = {}  # Словарь созданных дата классов
 
     def start(self):
-        self.provider.OnConnected = self.on_connected  # Соединение терминала с сервером QUIK
-        self.provider.OnDisconnected = self.on_disconnected  # Отключение терминала от сервера QUIK
-        self.provider.OnNewCandle = lambda data: self.new_bars.append(data['data'])  # Обработчик новых баров по подписке из QUIK
+        # Подключение терминала к серверу QUIK
+        self.provider.OnConnected = self._on_connected
+        # Отключение терминала от сервера QUIK
+        self.provider.OnDisconnected = self._on_disconnected
+        # Обработчик новых баров по подписке из QUIK
+        self.provider.OnNewCandle = self._on_candle
 
     def put_notification(self, msg, *args, **kwargs):
         self.notifs.append((msg, args, kwargs))
@@ -72,8 +65,10 @@ class QKStore(with_metaclass(MetaSingleton, object)):
         return [notif for notif in iter(self.notifs.popleft, None)]
 
     def stop(self):
-        self.provider.OnNewCandle = self.provider.DefaultHandler  # Возвращаем обработчик по умолчанию
-        self.provider.CloseConnectionAndThread()  # Закрываем соединение для запросов и поток обработки функций обратного вызова
+        # Возвращаем обработчик по умолчанию
+        self.provider.OnNewCandle = self.provider.default_handler
+        # Закрываем соединение для запросов и поток обработки функций обратного вызова
+        self.provider.close_connection()
 
     # Функции
 
@@ -85,38 +80,49 @@ class QKStore(with_metaclass(MetaSingleton, object)):
         :param bool reload: Получить информацию из QUIK
         :return: Значение из кэша/QUIK или None, если тикер не найден
         """
-        if reload or (class_code, sec_code) not in self.symbols:  # Если нужно получить информацию из QUIK или нет информации о тикере в справочнике
-            symbol_info = self.provider.GetSecurityInfo(class_code, sec_code)  # Получаем информацию о тикере из QUIK
-            if 'data' not in symbol_info:  # Если ответ не пришел (возникла ошибка). Например, для опциона
-                print(f'Информация о {self.class_sec_code_to_data_name(class_code, sec_code)} не найдена')
-                return None  # то возвращаем пустое значение
-            self.symbols[(class_code, sec_code)] = symbol_info['data']  # Заносим информацию о тикере в справочник
-        return self.symbols[(class_code, sec_code)]  # Возвращаем значение из справочника
+        # Если нужно получить информацию из QUIK или
+        # нет информации о тикере в справочнике
+        if reload or (class_code, sec_code) not in self.symbols:
+            # Получаем информацию о тикере из QUIK
+            symbol_info = self.provider.getSecurityInfo(class_code, sec_code)
+            # Если ответ не пришел (возникла ошибка). Например, для опциона
+            if not symbol_info:
+                print(f'Информация о {class_code}.{sec_code} не найдена')
+                return None
+            # Заносим информацию о тикере в справочник
+            self.symbols[(class_code, sec_code)] = symbol_info
+        # Возвращаем значение из справочника
+        return self.symbols[(class_code, sec_code)]
 
-    def data_name_to_class_sec_code(self, dataname):
-        """Код площадки и код тикера из названия тикера (с кодом площадки или без него)
+    def from_ticker(self, ticker):
+        """Код площадки и код тикера из названия тикера(с кодом площадки или без него)
 
-        :param str dataname: Название тикера
-        :return: Код площадки и код тикера
+        str -  ticker - Название тикера
+        return - Код площадки и код тикера
         """
-        symbol_parts = dataname.split('.')  # По разделителю пытаемся разбить тикер на части
-        if len(symbol_parts) >= 2:  # Если тикер задан в формате <Код площадки>.<Код тикера>
+        symbol_parts = ticker.split('.')
+        # Если тикер задан в формате <Код площадки>.<Код тикера>
+        if len(symbol_parts) >= 2:
             class_code = symbol_parts[0]  # Код площадки
             sec_code = '.'.join(symbol_parts[1:])  # Код тикера
         else:  # Если тикер задан без площадки
-            class_code = self.provider.GetSecurityClass(self.class_codes, dataname)['data']  # Получаем код площадки по коду инструмента из имеющихся классов
-            sec_code = dataname  # Код тикера
-        return class_code, sec_code  # Возвращаем код площадки и код тикера
+            # Получаем код площадки по коду инструмента из имеющихся классов
+            class_code = self.provider.getSecurityClass(self.class_codes, ticker)
+            sec_code = ticker  # Код тикера
+        return class_code, sec_code
 
     @staticmethod
-    def class_sec_code_to_data_name(class_code, sec_code):
+    def to_ticker(class_code: str, sec_code: str):
         """Название тикера из кода площадки и кода тикера
 
-        :param str class_code: Код площадки
-        :param str sec_code: Код тикера
-        :return: Название тикера
+        class_code - Код площадки
+        sec_code - Код тикера
+        return - Название тикера
         """
         return f'{class_code}.{sec_code}'
+
+    # TODO: Completly remove the transfer from the lots to pieces
+    # size_to_lots, lots_to_size, bt_to_quik_price, quik_to_bt_price
 
     def size_to_lots(self, class_code, sec_code, size: int):
         """Перевод кол-ва из штук в лоты
@@ -126,11 +132,13 @@ class QKStore(with_metaclass(MetaSingleton, object)):
         :param int size: Кол-во в штуках
         :return: Кол-во в лотах
         """
-        si = self.get_symbol_info(class_code, sec_code)  # Получаем параметры тикера (lot_size)
+        # Получаем параметры тикера (lot_size)
+        si = self.get_symbol_info(class_code, sec_code)
         if not si:  # Если тикер не найден
             return size  # то кол-во не изменяется
-        lot_size = int(si['lot_size'])  # Размер лота тикера
-        return int(size / lot_size) if lot_size > 0 else size  # Если задан лот, то переводим
+        lot_size = si['lot_size']  # Размер лота тикера
+        # Если задан лот, то переводим
+        return int(size / lot_size) if lot_size > 0 else size
 
     def lots_to_size(self, class_code, sec_code, lots: int):
         """Перевод кол-ва из лотов в штуки
@@ -140,11 +148,13 @@ class QKStore(with_metaclass(MetaSingleton, object)):
         :param int lots: Кол-во в лотах
         :return: Кол-во в штуках
         """
-        si = self.get_symbol_info(class_code, sec_code)  # Получаем параметры тикера (lot_size)
+        # Получаем параметры тикера (lot_size)
+        si = self.get_symbol_info(class_code, sec_code)
         if not si:  # Если тикер не найден
             return lots  # то лот не изменяется
-        lot_size = int(si['lot_size'])  # Размер лота тикера
-        return lots * lot_size if lot_size > 0 else lots  # Если задан лот, то переводим
+        lot_size = si['lot_size']  # Размер лота тикера
+        # Если задан лот, то переводим
+        return lots * lot_size if lot_size > 0 else lots
 
     def bt_to_quik_price(self, class_code, sec_code, price: float):
         """Перевод цен из BackTrader в QUIK
@@ -157,10 +167,11 @@ class QKStore(with_metaclass(MetaSingleton, object)):
         if class_code == 'TQOB':  # Для рынка облигаций
             return price / 10  # цену делим на 10
         if class_code == 'SPBFUT':  # Для рынка фьючерсов
-            si = self.get_symbol_info(class_code, sec_code)  # Получаем параметры тикера (lot_size)
+            # Получаем параметры тикера (lot_size)
+            si = self.get_symbol_info(class_code, sec_code)
             if not si:  # Если тикер не найден
                 return price  # то цена не изменяется
-            lot_size = int(si['lot_size'])  # Размер лота тикера
+            lot_size = si['lot_size']  # Размер лота тикера
             if lot_size > 0:  # Если лот задан
                 return price * lot_size  # то цену умножаем на лот
         return price  # В остальных случаях цена не изменяется
@@ -176,35 +187,46 @@ class QKStore(with_metaclass(MetaSingleton, object)):
         if class_code == 'TQOB':  # Для рынка облигаций
             return price * 10  # цену умножаем на 10
         if class_code == 'SPBFUT':  # Для рынка фьючерсов
-            si = self.get_symbol_info(class_code, sec_code)  # Получаем параметры тикера (lot_size)
+            # Получаем параметры тикера (lot_size)
+            si = self.get_symbol_info(class_code, sec_code)
             if not si:  # Если тикер не найден
                 return price  # то цена не изменяется
-            lot_size = int(si['lot_size'])  # Размер лота тикера
+            lot_size = si['lot_size']  # Размер лота тикера
             if lot_size > 0:  # Если лот задан
                 return price / lot_size  # то цену делим на лот
         return price  # В остальных случаях цена не изменяется
 
-    def on_connected(self, data):
+    def _on_connected(self, data):
         """Обработка событий подключения к QUIK"""
-        dt = datetime.now(self.MarketTimeZone)  # Берем текущее время на бирже из локального
+        # Берем текущее время на бирже из локального
+        dt = datetime.now(self.MarketTimeZone)
         print(f'{dt.strftime("%d.%m.%Y %H:%M")}: QUIK Подключен')
         self.connected = True  # QUIK подключен к серверу брокера
-        print(f'Проверка подписки тикеров ({len(self.subscribed_symbols)})')
-        for subscribed_symbol in self.subscribed_symbols:  # Пробегаемся по всем подписанным тикерам
-            class_code = subscribed_symbol['class']  # Код площадки
-            sec_code = subscribed_symbol['sec']  # Код тикера
-            interval = subscribed_symbol['interval']  # Временной интервал
-            print(f'{self.class_sec_code_to_data_name(class_code, sec_code)} на интервале {interval}', end=' ')
-            if not self.provider.IsSubscribed(class_code, sec_code, interval)['data']:  # Если нет подписки на тикер/интервал
-                self.provider.SubscribeToCandles(class_code, sec_code, interval)  # то переподписываемся
+        print(f'Проверка подписки тикеров ({len(self.subscribed_data)})')
+        # Пробегаемся по всем подписанным тикерам
+        for sub_symb in self.subscribed_data.values():
+            class_code = sub_symb.class_code  # Код площадки
+            sec_code = sub_symb.sec_code  # Код тикера
+            interval = sub_symb.interval  # Временной интервал
+            print(f'{class_code}.{sec_code} на интервале {interval}', end=' ')
+
+            # Если нет подписки на тикер/интервал
+            if not self.provider.is_subs(class_code, sec_code, interval):
+                self.provider.subs_to_candles(class_code, sec_code, interval)
                 print('нет подписки. Отправлен запрос на новую подписку')
             else:  # Если подписка была, то переподписываться не нужно
                 print('есть подписка')
 
-    def on_disconnected(self, data):
+    def _on_disconnected(self, data):
         """Обработка событий отключения от QUIK"""
-        if not self.connected:  # Если QUIK отключен от сервера брокера
-            return  # то не нужно дублировать сообщение, выходим, дальше не продолжаем
-        dt = datetime.now(self.MarketTimeZone)  # Берем текущее время на бирже из локального
+        # Если QUIK отключен от сервера брокера
+        # то не нужно дублировать сообщение, выходим, дальше не продолжаем
+        if not self.connected:
+            return None
+        dt = datetime.now(self.MarketTimeZone)
         print(f'{dt.strftime("%d.%m.%Y %H:%M")}: QUIK Отключен')
-        self.connected = False  # QUIK отключен от сервера брокера
+        self.connected = False
+
+    def _on_candle(self, data):
+        dataname = f'{data["class"]}.{data["sec"]}_{data["interval"]}'
+        self.subscribed_data[dataname].bars.append(data)
