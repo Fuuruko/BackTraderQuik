@@ -137,7 +137,7 @@ class QKData(AbstractDataBase):
         self.put_notification(self.DISCONNECTED)
 
     def haslivedata(self):
-        return self._laststatus==self.LIVE
+        return self._laststatus == self.LIVE
 
     # Функции
 
@@ -188,7 +188,6 @@ class QKData(AbstractDataBase):
         # Переводим строки в дату и время и возвращаем их
         if self.store.connected and self._laststatus == self.LIVE:
             # Может прийти неверная дата
-            # TODO: check on weekends
             d = self.prov.getInfoParam('TRADEDATE')  # Дата dd.mm.yyyy
             t = self.prov.getInfoParam('SERVERTIME')  # Время hh:mi:ss
             return datetime.strptime(f'{d} {t}', '%d.%m.%Y %H:%M:%S')

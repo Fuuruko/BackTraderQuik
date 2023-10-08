@@ -124,22 +124,6 @@ class QKStore(Store):
     # TODO: Completly remove the transfer from the lots to pieces
     # size_to_lots, lots_to_size, bt_to_quik_price, quik_to_bt_price
 
-    def size_to_lots(self, class_code, sec_code, size: int):
-        """Перевод кол-ва из штук в лоты
-
-        :param str class_code: Код площадки
-        :param str sec_code: Код тикера
-        :param int size: Кол-во в штуках
-        :return: Кол-во в лотах
-        """
-        # Получаем параметры тикера (lot_size)
-        si = self.get_symbol_info(class_code, sec_code)
-        if not si:  # Если тикер не найден
-            return size  # то кол-во не изменяется
-        lot_size = si['lot_size']  # Размер лота тикера
-        # Если задан лот, то переводим
-        return int(size / lot_size) if lot_size > 0 else size
-
     def lots_to_size(self, class_code, sec_code, lots: int):
         """Перевод кол-ва из лотов в штуки
 
