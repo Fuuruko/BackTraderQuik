@@ -14,17 +14,11 @@ class QKData(AbstractDataBase):
         # False - пропускать дожи 4-х цен, True - не пропускать
         ('FourPriceDoji', False),
         ('live', False),  # False - только история, True - история и новые бары
-        ('count', 0)  # Кол-во полученных свечей. 0 - все доступные
+        ('count', 0)  # Получаем последние {count} свечей. 0 - все доступные
     )
 
     _time_correction = timedelta(seconds=1)
     interval = 1
-
-    def islive(self):
-        """Если подаем новые бары, то Cerebro не будет запускать preload
-        и runonce, т.к. новые бары должны идти один за другим
-        """  # noqa: D205
-        return self.p.live
 
     def __init__(self, store, **kwargs):
         # Для минутных временнЫх интервалов ставим кол-во минут
@@ -63,6 +57,12 @@ class QKData(AbstractDataBase):
 
         self.subs2bars()
 
+    def stop(self):
+        super().stop()
+        if self.p.live:
+            self.prov.unsubs_from_candles(self.class_code, self.sec_code, self.interval)
+        self.put_notification(self.DISCONNECTED)
+
     def subs2bars(self):
         # Отправляем уведомление об отправке исторических (не новых) баров
         self.put_notification(self.NOTSUBSCRIBED)
@@ -98,29 +98,26 @@ class QKData(AbstractDataBase):
             if not self.p.live:
                 self.put_notification(self.DISCONNECTED)
                 return False
-            if self._laststatus != self.LIVE:
+            if not self.status_live():
                 self.put_notification(self.LIVE)
             return None
 
         bar = self.bars.popleft()
         # TODO: Could be removed
-        if not self.is_old_bar(bar):
+        if not self.is_valid(bar):
             return None
 
         # Бывает ситуация, когда QUIK несколько минут не передает новые бары,
         # а затем передает все пропущенные. Чтобы не совершать сделки на истории,
         # меняем режим торгов на историю до прихода нового бара
         # Если в LIVE режиме, и следующий бар не является LIVE
-        if self._laststatus == self.LIVE and not bar['live']:
+        if self.status_live() and not bar['live']:
             # Отправляем уведомление об отправке исторических (не новых) баров
             self.put_notification(self.DELAYED)
 
         # Переводим в формат хранения даты/времени в BackTrader
         self.lines.datetime[0] = date2num(self.open_datetime(bar))
-        # self.lines.open[0] = self.store.quik_to_bt_price(self.class_code, self.sec_code, bar['open'])
-        # self.lines.high[0] = self.store.quik_to_bt_price(self.class_code, self.sec_code, bar['high'])
-        # self.lines.low[0] = self.store.quik_to_bt_price(self.class_code, self.sec_code, bar['low'])
-        # self.lines.close[0] = self.store.quik_to_bt_price(self.class_code, self.sec_code, bar['close'])
+
         self.lines.open[0] = bar['open']
         self.lines.high[0] = bar['high']
         self.lines.low[0] = bar['low']
@@ -130,18 +127,19 @@ class QKData(AbstractDataBase):
         self.lines.openinterest[0] = 0
         return True
 
-    def stop(self):
-        super().stop()
-        if self.p.live:
-            self.prov.unsubs_from_candles(self.class_code, self.sec_code, self.interval)
-        self.put_notification(self.DISCONNECTED)
+    def islive(self):
+        """Если подаем новые бары, то Cerebro не будет запускать preload
+        и runonce, т.к. новые бары должны идти один за другим
+        """  # noqa: D205
+        return self.p.live
 
     def haslivedata(self):
         return self._laststatus == self.LIVE
 
+    status_live = haslivedata
     # Функции
 
-    def is_old_bar(self, bar):
+    def is_valid(self, bar):
         """Проверка бара на соответствие условиям выборки"""
         # Если получили несформированный бар. Например, дневной бар в середине сессии
         if self.is_unformed_bar(bar):
@@ -181,12 +179,12 @@ class QKData(AbstractDataBase):
     def quik_datetime_now(self):
         """Текущая дата и время
 
-        - Если получили последний бар истории, то запрашием текущие дату и время из QUIK
+        - Если получили последний бар истории, то запрашиваем текущие дату и время из QUIK
         - Если находимся в режиме получения истории,
           то переводим текущие дату и время с компьютера в МСК
         """
         # Переводим строки в дату и время и возвращаем их
-        if self.store.connected and self._laststatus == self.LIVE:
+        if self.store.connected and self.status_live():
             # Может прийти неверная дата
             d = self.prov.getInfoParam('TRADEDATE')  # Дата dd.mm.yyyy
             t = self.prov.getInfoParam('SERVERTIME')  # Время hh:mi:ss
@@ -201,11 +199,11 @@ class DojiFilter(metaclass=MetaParams):
         pass
 
     def __call__(self, data):
-        '''Return Values:
+        """Return Values:
 
         - False: data stream was not touched
         - True: data stream was manipulated (doji bar removed)
-        '''  # noqa: D300
+        """
         if data.high[0] != data.low[0]:
             return False
 
